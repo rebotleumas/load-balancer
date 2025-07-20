@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.ScheduledThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 public class LoadBalancer {
     private final HttpServer server;
@@ -69,13 +70,13 @@ public class LoadBalancer {
     }
 
     static class RoundRobinHandler implements HttpHandler {
-        private List<URI> servers;
-        private int requestCount;
+        private volatile List<URI> servers;
+        private final AtomicInteger requestCount = new AtomicInteger(0);
         private final HttpClient client;
+        private final Object serverLock = new Object();  // Lock for server updates
 
         public RoundRobinHandler(List<URI> servers, HttpClient client) {
             this.servers = servers;
-            this.requestCount = 0;
             this.client = client;
         }
 
@@ -101,19 +102,25 @@ public class LoadBalancer {
                 exchange.close();
             } catch (InterruptedException e) {
                 throw new RuntimeException(e);
-            } finally {
-                this.requestCount++;
             }
         }
 
         public void setServers(List<URI> servers) {
-            this.servers = servers;
+            synchronized (serverLock) {
+                this.servers = servers;
+                this.requestCount.set(0);
+            }
         }
 
         private URI getNextUri() {
-            int numberOfServers = this.servers.size();
-            int idx = this.requestCount % numberOfServers;
-            return this.servers.get(idx);
+            synchronized (serverLock) {
+                if (this.servers.isEmpty()) {
+                    throw new RuntimeException("No healthy servers");
+                }
+                int numberOfServers = this.servers.size();
+                int idx = requestCount.getAndIncrement() % numberOfServers;
+                return this.servers.get(idx);
+            }
         }
     }
 }
